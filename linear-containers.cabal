@@ -1,0 +1,51 @@
+cabal-version: 2.4
+name: linear-containers
+version: 0.1.0.0
+description: Containers on an unmanaged heap
+homepage: https://github.com/andrewthad/linear-containers
+bug-reports: https://github.com/andrewthad/linear-containers/issues
+author: Andrew Martin
+maintainer: andrew.thaddeus@gmail.com
+copyright: 2018 Andrew Martin
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+extra-source-files: README.md
+
+source-repository head
+  type: git
+  location: https://github.com/andrewthad/linear-containers
+
+library
+  exposed-modules:
+    Data.Linear.Deallocation
+    Data.Linear.Ref
+    Data.Linear.Struct
+    Data.Linear.Types
+    Data.Linear.Array.Ref
+    Data.Linear.Array.Struct
+    Data.Linear.IntSet
+    Data.Semigroup.Linear
+    Data.Linear.Class
+    Data.Linear.State
+  other-modules:
+    Data.Linear.Unsafe
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.12 && <5
+    , primitive >= 0.6.4
+  default-language: Haskell2010
+
+test-suite linear-containers-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_linear_containers
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , linear-containers
+  default-language: Haskell2010
