@@ -28,10 +28,17 @@ library
     Data.Semigroup.Linear
     Data.Linear.Class
     Data.Linear.State
+    Linear.Unsafe
+    Linear.Reference
+    Linear.Class
+    Linear.Types
+    Linear.List
+    Linear.State
   other-modules:
     Data.Linear.Unsafe
   hs-source-dirs:
       src
+  ghc-options: -ddump-to-file -ddump-simpl -dsuppress-all -O2
   build-depends:
       base >=4.12 && <5
     , primitive >= 0.6.4

@@ -130,7 +130,7 @@ withAllocationNonlinear a f = case mallocBytes (sizeIndirection (Proxy :: Proxy 
       Buffer ptr1 s1 -> f (Ref (castPtr ptr1) s1)
 
 {-# NOINLINE dupState# #-}
-dupState# :: State# RealWorld ->. State# RealWorld ->. State# RealWorld
+dupState# :: State# RealWorld ->. (# State# RealWorld, State# RealWorld #)
 dupState# = unsafeCoerce dupStateNonlinear#
 
 dupStateNonlinear# :: State# RealWorld -> (# State# RealWorld, State# RealWorld #)
