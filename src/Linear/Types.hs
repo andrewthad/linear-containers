@@ -18,7 +18,6 @@ module Linear.Types
   ) where
 
 import Data.Kind (Type)
-import Data.Linear.State (State)
 import Foreign.Ptr 
 import Linear.Class ((<>.),coappend)
 import Linear.Unsafe (Reference(..),Mode(..),Token(..))
