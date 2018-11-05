@@ -3,4 +3,4 @@ source-repository-package
   type: git
   location: https://github.com/haskell/primitive.git
   tag: fb594e9897e4bf9ef7105502c04f6e438bd5fb1b
-with-compiler: /usr/local/bin/ghc-8.7.20181102
+with-compiler: /usr/local/bin/ghc-8.7.20181105

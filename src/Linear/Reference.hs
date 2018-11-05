@@ -13,6 +13,7 @@ module Linear.Reference
   , dynamically_
   , modify
   , allocate
+  , allocate'
   , deallocate
   ) where
 

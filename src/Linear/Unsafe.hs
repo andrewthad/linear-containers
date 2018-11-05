@@ -18,7 +18,7 @@ module Linear.Unsafe
 
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr)
-import GHC.Exts (Ptr(..),State#,RealWorld,realWorld#)
+import GHC.Exts (Ptr(..),State#,RealWorld,realWorld#,forkState#,joinState#)
 import GHC.IO (IO(..))
 import Data.Kind (Type)
 import Unsafe.Coerce (unsafeCoerce)
@@ -38,10 +38,10 @@ data Token where
   Token :: !(State# RealWorld) ->. Token
 
 instance L.Semigroup Token where
-  append (Token a) (Token b) = Token (jamState# a b)
+  append (Token a) (Token b) = Token (joinState# a b)
 
 instance L.Cosemigroup Token where
-  coappend (Token a) = dupState# a
+  coappend (Token a) = forkStateHelper (forkState# a)
 
 withDeallocate :: Addr -> Token ->. (Token ->. a) ->. a
 withDeallocate = unsafeCoerce withDeallocateNonlinear
@@ -59,19 +59,8 @@ withAllocatedBytesNonlinear :: Int -> Token -> (Addr -> Token ->. a) ->. a
 withAllocatedBytesNonlinear n (Token s0) f = case unIO (mallocBytes n) s0 of
   (# s1, Ptr addr# #) -> f (Addr addr#) (Token s1)
 
-jamState# :: State# RealWorld ->. State# RealWorld ->. State# RealWorld
-jamState# = unsafeCoerce jamStateNonlinear#
-
-{-# NOINLINE jamStateNonlinear# #-}
-jamStateNonlinear# :: State# RealWorld -> State# RealWorld -> State# RealWorld
-jamStateNonlinear# !_ !_ = realWorld#
-
-{-# NOINLINE dupState# #-}
-dupState# :: State# RealWorld ->. (Token, Token)
-dupState# = unsafeCoerce dupStateNonlinear#
-
-dupStateNonlinear# :: State# RealWorld -> (Token, Token)
-dupStateNonlinear# s = (Token s, Token s)
+forkStateHelper :: (# State# RealWorld, State# RealWorld #) ->. (Token, Token)
+forkStateHelper (# s0, s1 #) = (Token s0, Token s1)
 
 unIO :: IO a -> State# RealWorld -> (# State# RealWorld, a #)
 unIO (IO f) = f
