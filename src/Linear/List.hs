@@ -80,7 +80,7 @@ map g (Cons ref x) = Cons
   ( R.statically_
     ref
     (\xs t -> mapHelp2 g xs t)
-  ) x
+  ) (g x)
 
 -- | Map over a reference to a list, updating the elements in-place.
 map' :: forall f. Object f
