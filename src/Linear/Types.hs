@@ -30,6 +30,8 @@ import qualified GHC.Exts as E
 import qualified Data.Primitive as PM
 import qualified Linear.Class as C
 
+-- | Object types can be serialized to the unmanaged heap. This includes
+--   types containing a 'Reference' but excludes types containing functions.
 class Object (f :: Mode -> Type) where 
   -- | The size of the object in bytes.
   size :: Proxy f -> Int
@@ -46,7 +48,9 @@ class Object (f :: Mode -> Type) where
 --   this gives the user access the additional conveniences when
 --   working with these types.
 class Object f => Referential (f :: Mode -> Type) where
+  -- | Combine the token with a reference inside of the object.
   inhume :: Token ->. f m ->. f m
+  -- | Duplicate a token that exists in the object.
   exhume :: f m ->. (Token, f m)
 
 instance Object (Reference f) where
@@ -61,11 +65,13 @@ instance Referential (Reference f) where
   inhume a (Reference addr b) = Reference addr (a <>. b)
   exhume (Reference addr a) = C.uncurry (\b c -> (b, Reference addr c)) (coappend a)
 
+-- | An unrestricted value.
 data Unrestricted a where
   Unrestricted :: a -> Unrestricted a
   deriving (Show)
 
 -- | Recover an 'Object' instance from a 'Prim' instance.
+--   This currently requires using @unsafeCoerce@ internally.
 newtype PrimObject :: Type -> Mode -> Type where
   PrimObject :: a ->. PrimObject a m
 

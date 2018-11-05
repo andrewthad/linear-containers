@@ -28,7 +28,7 @@ import qualified Linear.Types as L
 import qualified Linear.Reference as R
 import qualified Data.Primitive as PM
 
--- | A linked list that must be consumed linearly.
+-- | A singly-linked list that must be consumed linearly.
 data List :: (Mode -> Type) -> Mode -> Type where
   Cons :: {-# UNPACK #-} !(Reference (List f) m) ->. !(f m) ->. List f m
   Nil :: List f m
