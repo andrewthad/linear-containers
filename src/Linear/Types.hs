@@ -31,9 +31,13 @@ import qualified Data.Primitive as PM
 import qualified Linear.Class as C
 
 class Object (f :: Mode -> Type) where 
+  -- | The size of the object in bytes.
   size :: Proxy f -> Int
+  -- | Write the object to the specified memory address.
   poke :: Addr -> f m ->. Token ->. Token
+  -- | Read the object from the specified memory address.
   peek :: Addr -> Token ->. (Token, f m)
+  -- | Discard all linear components of the static object.
   forget :: f 'Static ->. Token ->. Token
 
 -- | Typeclass for types that include a reference. This means
