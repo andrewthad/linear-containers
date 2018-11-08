@@ -10,14 +10,17 @@
 module Linear.Reference
   ( -- * Primitives
     read
-  -- , statically
+  , statically
   , statically_
+  , statically_'
+  , dynamically
   , dynamically_
-  , dynamically_'
   , modify
+  , modify_
   , allocate
   -- , allocate'
   , deallocate
+  , run
     -- * Reasoning
     -- $reasoning
   ) where
@@ -25,37 +28,43 @@ module Linear.Reference
 import Prelude hiding (read)
 
 import Data.Primitive (Addr)
-import Linear.Types (Mode(..),Unrestricted(..),Object,Token,Action)
-import Linear.Unsafe (Reference(..))
-import Linear.Class ((<>.))
+import Linear.Types (Object,Token)
+import Linear.Unsafe (Reference(..),Static(..))
+import Linear.Class (Unrestricted(..),(<>.))
 import Data.Proxy (Proxy(..))
+import Unsafe.Coerce (unsafeCoerce)
 
 import qualified Linear.Unsafe as U
 import qualified Linear.Types as L
 import qualified Linear.Class as C
 import qualified GHC.Exts as E
 
--- | Combine a token with an action, preserving the mode of the action.
-act :: Token ->. Action m ->. Action m
-act (U.Token s0) (U.Action s1) = U.Action (E.joinState# s0 s1)
-
--- | Weaken an action to a token.
-tokenize :: Action m ->. Token  
-tokenize (U.Action s) = U.Token s 
-
 -- | Read the value at a static reference, discarding the reference.
 read :: Object a
-  =>  Reference a
-  ->. Action 'Static
-  ->. (Action 'Static, a)
-read (Reference addr t0) c0 = C.first (\(U.Token s1) -> U.Action s1) (L.peek addr (t0 <>. tokenize c0))
+  =>  Static (Reference a)
+  ->. (Token, Static a)
+read (Static (Reference addr t0)) = C.second Static (L.peek addr t0)
 
 statically_ :: Object a
   =>  Reference a
-  ->. (a ->. Action 'Static ->. Action 'Static)
+  ->. (Static a ->. Token)
   ->. Reference a
 statically_ (Reference addr t0) f =
-  Reference addr (tokenize (C.uncurry (\(U.Token s1) a -> f a (U.Action s1)) (L.peek addr t0)))
+  Reference addr (C.uncurry (\t1 a -> t1 <>. f (Static a)) (L.peek addr t0))
+
+statically_' :: 
+      Reference a
+  ->. (Static (Reference a) ->. Token)
+  ->. Reference a
+statically_' (Reference addr t0) f =
+  Reference addr (f (Static (Reference addr t0)))
+
+statically :: Object a
+  =>  Reference a
+  ->. (Static a ->. (Token, Unrestricted b))
+  ->. (Reference a, Unrestricted b)
+statically (Reference addr t0) f =
+  C.uncurry (\t1 a -> C.uncurry (\t2 u -> (Reference addr (t1 <>. t2), u)) (f (Static a))) (L.peek addr t0)
 
 -- statically ::
 --       Reference a
@@ -66,40 +75,99 @@ statically_ (Reference addr t0) f =
 -- staticallyStep :: Addr -> (Action 'Static, Unrestricted b) ->. (Reference a, Unrestricted b)
 -- staticallyStep !addr (!t1,u) = (Reference addr t1, u)
 
--- | Read a static reference, operating on its object dynamically.
+-- | Read a reference, operating on its object dynamically.
 dynamically_ :: Object a
-  =>  Reference a
-  ->. (a ->. Action 'Dynamic ->. (Action 'Dynamic, a))
-  ->. Reference a
-dynamically_ (Reference addr t0) f =
-  (C.uncurry (\(U.Token s1) a -> C.uncurry (\(U.Action s2) a' -> Reference addr (L.poke addr a' (U.Token s2))) (f a (U.Action s1))) (L.peek addr t0))
+  =>  Static (Reference a)
+  ->. (a ->. a)
+  ->. Static (Reference a)
+dynamically_ (Static (Reference addr t0)) f =
+  (C.uncurry (\t1 a -> Static (Reference addr (L.poke addr (f a) t1))) (L.peek addr t0))
 
--- | Use a neutral token as a dynamic action. The token is restored after
+-- | Read a reference, operating on its object dynamically. Additionally,
+--   return extra data. The extra data does not need to be unrestricted.
+--
+--   TODO: Think very carefully about whether or not this is actually safe.
+dynamically :: Object a
+  =>  Static (Reference a)
+  ->. (a ->. Token ->. (Token, (a, b)))
+  ->. (Static (Reference a), b)
+dynamically (Static (Reference addr t0)) f =
+  (C.uncurry (\t1 a -> C.uncurry (\t2 (a',b) -> (Static (Reference addr (L.poke addr a' t2)),b)) (f a t1)) (L.peek addr t0))
+
+-- | Repeatedly follow the references until the callback returns @Left@.
+--   At that point, update the reference we are currently in, and then
+--   return.
+dynamicallyUntil :: Object a
+  =>  Static (Reference a)
+  ->. (Static a ->. Either (Static b) (Static (Reference a)))
+  ->  (b ->. a)
+  ->. Token
+dynamicallyUntil (Static (Reference addr t0)) f g = C.uncurry
+  (\t1 a -> dynamicallyUntilGo addr (f a) f g t1)
+  (L.peek addr t0)
+
+dynamicallyUntilGo :: Object a
+  =>  Addr -- the parent, that is, the address from which the Either came
+  ->  Either b (Static (Reference a))
+  ->. (Static a ->. Either b (Static (Reference a)))
+  ->  (b ->. a)
+  ->. Token
+  ->. Token
+dynamicallyUntilGo addr (Left b) f g t = L.poke addr (g b) t
+dynamicallyUntilGo addr (Right (Static (Reference addrNext t))) f g =
+  dynamicallyUntilGo addrNext _ f g _
+  (L.peek addr t0)
+
+
+-- -- | This function is truly terrible. Its implementation requires an unsafe
+-- --   coercion of linearity. However, I cannot think of a implementation
+-- --   that does not do this. This function is kind of like @dynamically@
+-- --   followed by @read@ except that we are allowed to preserve knowledge
+-- --   about how the reference was updated. Also, think hard about the
+-- --   correctness of this function.
+-- dynamically2 :: Object a
+--   =>  Static (Reference a)
+--   ->. (a ->. Token ->. (Token, Either (b,c) (d,e)))
+--   ->. (b ->. a)
+--   ->  (d ->. a)
+--   ->  (Token, Either (Static b,c) (Static c,d))
+-- dynamically2 (Static (Reference addr t0)) f g h = C.uncurry
+--   (\t1 a -> C.uncurry (goDynamically2 g h) (f a t1))
+--   (L.peek addr t0)
+-- 
+-- goDynamically2 ::
+--       (b ->. a)
+--   ->  (d ->. a)
+--   ->  Token
+--   ->. Either (b,c) (d,e)
+--   ->. (Token, Either (Static b,c) (Static c,d))
+-- goDynamically2 g h t0 (Left (b0,c)) = C.uncurry (\b1 b2 -> (_,Left (Static b2,c)) (dupUnsafe b0)
+
+dupUnsafe :: a ->. (a,a)
+dupUnsafe = unsafeCoerce dupNonlinear
+
+dupNonlinear :: a -> (a,a)
+dupNonlinear x = (x,x)
+
+--   Use a neutral token as a dynamic action. The token is restored after
 --   the continuation finishes. The only way that a dynamic action can
 --   escape this function is if the type @a@ itself has dynamic actions.
 --   In that case, it is fine. This function relies on the impossibility
 --   of duplicating a dynamic action.
-dynamically_' ::
-      (Action 'Dynamic ->. (Action 'Dynamic, a))
-  ->. Token
-  ->. (Token, a)
-dynamically_' f (U.Token s0) =
-  C.first tokenize (f (U.Action s0))
+-- dynamically_' ::
+--       (Action 'Dynamic ->. (Action 'Dynamic, a))
+--   ->. Token
+--   ->. (Token, a)
+-- dynamically_' f (U.Token s0) =
+--   C.first tokenize (f (U.Action s0))
 
 -- | Allocate an object on the unmanaged heap.
 allocate :: forall a. Object a
   =>  a
-  ->. Action 'Dynamic
-  ->. (Action 'Dynamic, Reference a)
+  ->. Token
+  ->. (Token, Reference a)
 allocate a !c0 = U.withAllocatedBytes (L.size (Proxy :: Proxy a)) c0
-  (\addr c1 -> C.second (\c2 -> Reference addr (L.poke addr a (tokenize c2))) (unsafeDupAction c1))
-
--- Only used internally. This is not safe to do in general.
-unsafeDupAction :: Action m ->. (Action m, Action m)
-unsafeDupAction (U.Action a) = forkStateActionHelper (E.forkState# a)
-
-forkStateActionHelper :: (# E.State# E.RealWorld, E.State# E.RealWorld #) ->. (Action m, Action m)
-forkStateActionHelper (# s0, s1 #) = (U.Action s0, U.Action s1)
+  (\addr c1 -> C.second (\c2 -> Reference addr (L.poke addr a c2)) (C.coappend c1))
 
 -- Allocate a referential object on the unmanaged heap.
 -- allocate' :: forall f. Referential a
@@ -110,23 +178,36 @@ forkStateActionHelper (# s0, s1 #) = (U.Action s0, U.Action s1)
 -- | Deallocate an object from the unmanaged heap.
 deallocate :: forall a. Object a
   =>  Reference a
-  ->. Action 'Dynamic
-  ->. (Action 'Dynamic, a)
-deallocate (Reference addr t0) c0 = C.uncurry
-  (\t1 a -> U.withDeallocate addr (act t1 c0) (\t2 -> (t2, a)))
+  ->. (Token, a)
+deallocate (Reference addr t0) = C.uncurry
+  (\t1 a -> U.withDeallocate addr t1 (\t2 -> (t2, a)))
   (L.peek addr t0)
 
--- | Modify a reference.
+-- | Modify a reference, returning some additional unrestricted data.
 modify :: Object a
+  =>  Reference a
+  ->. (a ->. (a,b))
+  ->. (Reference a,b)
+modify (Reference addr t0) f =
+  (C.uncurry (\t1 (a,u) -> (Reference addr (L.poke addr a t1), u)) (C.second f (L.peek addr t0)))
+
+-- | Modify a reference.
+modify_ :: Object a
   =>  Reference a
   ->. (a ->. a)
   ->. Reference a
-modify (Reference addr t0) f =
+modify_ (Reference addr t0) f =
   Reference addr (C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0)))
 
--- run :: (Action Dynamic ->. (Action Dynamic,Unrestricted a)) ->. Unrestricted a
--- run f = _
+run :: (Token ->. (Token,Unrestricted a)) ->. Unrestricted a
+run = unsafeCoerce runNonlinear
 
+runNonlinear :: (Token ->. (Token,Unrestricted a)) -> Unrestricted a
+runNonlinear f = E.runRW#
+  (\s -> case f (U.Token s) of
+    (U.Token s',Unrestricted u) -> case E.seq# u s' of
+      (# _, u' #) -> Unrestricted u'
+  )
 
 {- $reasoning
  
