@@ -1,9 +1,13 @@
 {-# language BangPatterns #-}
 {-# language DataKinds #-}
+{-# language GADTs #-}
 {-# language KindSignatures #-}
 {-# language LinearTypes #-}
+{-# language MagicHash #-}
 {-# language QuantifiedConstraints #-}
+{-# language RankNTypes #-}
 {-# language ScopedTypeVariables #-}
+{-# language UnboxedTuples #-}
 
 module Linear.Reference
   ( -- * Primitives
@@ -12,25 +16,140 @@ module Linear.Reference
   , statically
   , statically_
   , dynamically_
+  , descend
   , modify
   , allocate
   , allocate'
   , deallocate
+  , run
     -- * Reasoning
     -- $reasoning
   ) where
 
 import Prelude hiding (read)
 
+import Data.Kind (Type)
 import Data.Primitive (Addr)
-import Linear.Types (Mode(..),Unrestricted(..),Object,Token,Referential(..))
+import Linear.Types (Mode(..),Object,Token,Referential(..))
 import Linear.Unsafe (Reference(..))
+import Linear.Class (Unrestricted(..))
 import Data.Proxy (Proxy(..))
+import Unsafe.Coerce (unsafeCoerce)
 
+import qualified GHC.Exts as E
 import qualified Linear.Unsafe as U
 import qualified Linear.Types as L
 import qualified Linear.Class as C
 
+-- | Discard a static reference.
+ignore :: Reference f 'Static ->. Token
+ignore (Reference _ t) = t
+
+-- | Read the value at a static reference, discarding the reference.
+read :: Object f
+  =>  Reference f 'Static
+  ->. (Token, f 'Static)
+read (Reference addr t0) = L.peek addr t0
+
+statically_ :: Object f
+  =>  Reference f 'Dynamic
+  ->. (Reference f 'Static ->. Token)
+  ->. Reference f 'Dynamic
+statically_ (Reference addr t0) f = Reference addr (f (Reference addr t0))
+
+statically ::
+      Reference f 'Dynamic
+  ->. (Reference f 'Static ->. (Token, Unrestricted a))
+  ->. (Reference f 'Dynamic, Unrestricted a)
+statically (Reference addr t0) f = staticallyStep addr (f (Reference addr t0))
+
+staticallyStep :: Addr -> (Token, Unrestricted a) ->. (Reference f 'Dynamic, Unrestricted a)
+staticallyStep !addr (!t1,u) = (Reference addr t1, u)
+
+-- | Read a static reference, operating on its object dynamically.
+dynamically_ :: Object f
+  =>  Reference f 'Static
+  ->. (f 'Dynamic ->. f 'Dynamic)
+  ->. Token
+dynamically_ (Reference addr t0) f =
+  C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0))
+
+-- | Repeatedly follow the references until the callback returns @Left@.
+--   At that point, update the reference we are currently in, and then
+--   return.
+descend :: Object f
+  =>  Reference f 'Static
+  ->. (forall (m :: Mode). f m ->. Either (g m) (h m))
+  ->  (g 'Static ->. Reference f 'Static)
+  ->  (h 'Dynamic ->. f 'Dynamic)
+  ->. Token
+descend (Reference addr t0) = descendGo addr t0
+
+descendGo :: Object f
+  =>  Addr
+  ->  Token
+  ->. (forall (m :: Mode). f m ->. Either (g m) (h m))
+  ->  (g 'Static ->. Reference f 'Static)
+  ->  (h 'Dynamic ->. f 'Dynamic)
+  ->.  Token
+descendGo addr t0 f g h = L.peeking addr t0
+  ( \t1 x -> descendEither addr t1 (f x) f g h
+  ) 
+
+descendEither :: Object f
+  =>  Addr
+  ->  Token
+  ->. (forall m. Either (g m) (h m))
+  ->. (forall (m :: Mode). f m ->. Either (g m) (h m))
+  ->  (g 'Static ->. Reference f 'Static)
+  ->  (h 'Dynamic ->. f 'Dynamic)
+  ->.  Token
+descendEither addr t0 (Left x) f g h = descend (L.inhume t0 (g x)) f g h
+descendEither addr t0 (Right x) f g h = L.poke addr (h x) t0
+
+-- descendEither :: Object f
+--   =>  g 'Static
+--   ->. h 'Static 
+
+-- | Allocate an object on the unmanaged heap.
+allocate :: forall f. Object f
+  =>  f 'Dynamic
+  ->. Token
+  ->. Reference f 'Dynamic
+allocate a !t0 = U.withAllocatedBytes (L.size (Proxy :: Proxy f)) t0
+  (\addr t1 -> Reference addr (L.poke addr a t1))
+
+-- | Allocate a referential object on the unmanaged heap.
+allocate' :: forall f. Referential f
+  =>  f 'Dynamic
+  ->. Reference f 'Dynamic
+allocate' a = C.uncurry (C.flip allocate) (L.exhume a)
+
+-- | Deallocate an object from the unmanaged heap.
+deallocate :: forall f. Object f
+  =>  Reference f 'Dynamic
+  ->. (Token, f 'Dynamic)
+deallocate (Reference addr t0) = C.uncurry
+  (\t1 a -> U.withDeallocate addr t1 (\t2 -> (t2, a)))
+  (L.peek addr t0)
+
+-- | Modify either a static reference or a dynamic reference.
+modify :: Object f
+  =>  Reference f m
+  ->. (f 'Dynamic ->. f 'Dynamic)
+  ->. Reference f m
+modify (Reference addr t0) f =
+  Reference addr (C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0)))
+
+run :: (Token ->. (Token,Unrestricted a)) ->. Unrestricted a
+run = unsafeCoerce runNonlinear
+
+runNonlinear :: (Token ->. (Token,Unrestricted a)) -> Unrestricted a
+runNonlinear f = E.runRW#
+  (\s -> case f (U.Token s) of
+    (U.Token s',Unrestricted u) -> case E.seq# u s' of
+      (# _, u' #) -> Unrestricted u'
+  )
 
 {- $reasoning
  
@@ -112,68 +231,3 @@ and execute a continuation on the object. So, to switch modes,
 the user must follow a reference.
 
 -}
-
--- | Discard a static reference.
-ignore :: Reference f 'Static ->. Token
-ignore (Reference _ t) = t
-
--- | Read the value at a static reference, discarding the reference.
-read :: Object f
-  =>  Reference f 'Static
-  ->. (Token, f 'Static)
-read (Reference addr t0) = L.peek addr t0
-
-statically_ :: Object f
-  =>  Reference f 'Dynamic
-  ->. (f 'Static ->. Token ->. Token)
-  ->. Reference f 'Dynamic
-statically_ (Reference addr t0) f =
-  Reference addr (C.uncurry (C.flip f) (L.peek addr t0))
-
-statically ::
-      Reference f 'Dynamic
-  ->. (Reference f 'Static ->. (Token, Unrestricted a))
-  ->. (Reference f 'Dynamic, Unrestricted a)
-statically (Reference addr t0) f = staticallyStep addr (f (Reference addr t0))
-
-staticallyStep :: Addr -> (Token, Unrestricted a) ->. (Reference f 'Dynamic, Unrestricted a)
-staticallyStep !addr (!t1,u) = (Reference addr t1, u)
-
--- | Read a static reference, operating on its object dynamically.
-dynamically_ :: Object f
-  =>  Reference f 'Static
-  ->. (f 'Dynamic ->. f 'Dynamic)
-  ->. Token
-dynamically_ (Reference addr t0) f =
-  C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0))
-
--- | Allocate an object on the unmanaged heap.
-allocate :: forall f. Object f
-  =>  f 'Dynamic
-  ->. Token
-  ->. Reference f 'Dynamic
-allocate a !t0 = U.withAllocatedBytes (L.size (Proxy :: Proxy f)) t0
-  (\addr t1 -> Reference addr (L.poke addr a t1))
-
--- | Allocate a referential object on the unmanaged heap.
-allocate' :: forall f. Referential f
-  =>  f 'Dynamic
-  ->. Reference f 'Dynamic
-allocate' a = C.uncurry (C.flip allocate) (L.exhume a)
-
--- | Deallocate an object from the unmanaged heap.
-deallocate :: forall f. Object f
-  =>  Reference f 'Dynamic
-  ->. (Token, f 'Dynamic)
-deallocate (Reference addr t0) = C.uncurry
-  (\t1 a -> U.withDeallocate addr t1 (\t2 -> (t2, a)))
-  (L.peek addr t0)
-
--- | Modify either a static reference or a dynamic reference.
-modify :: Object f
-  =>  Reference f m
-  ->. (f 'Dynamic ->. f 'Dynamic)
-  ->. Reference f m
-modify (Reference addr t0) f =
-  Reference addr (C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0)))
-
