@@ -17,9 +17,9 @@ module Linear.Reference
   , statically_
   , dynamically_
   , descend
+  , burrow
   , modify
   , allocate
-  , allocate'
   , deallocate
   , run
     -- * Reasoning
@@ -30,9 +30,9 @@ import Prelude hiding (read)
 
 import Data.Kind (Type)
 import Data.Primitive (Addr)
-import Linear.Types (Mode(..),Object,Token,Referential(..))
+import Linear.Types (Mode(..),Object,Token)
 import Linear.Unsafe (Reference(..))
-import Linear.Class (Unrestricted(..))
+import Linear.Class (Unrestricted(..),(<>.))
 import Data.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -48,15 +48,20 @@ ignore (Reference _ t) = t
 -- | Read the value at a static reference, discarding the reference.
 read :: Object f
   =>  Reference f 'Static
-  ->. (Token, f 'Static)
+  ->. f 'Static
 read (Reference addr t0) = L.peek addr t0
 
+-- | Statically scope a computation without producing a unrestricted
+--   result.
 statically_ :: Object f
   =>  Reference f 'Dynamic
   ->. (Reference f 'Static ->. Token)
   ->. Reference f 'Dynamic
 statically_ (Reference addr t0) f = Reference addr (f (Reference addr t0))
 
+-- | Statically scope a computation. This computation may freely
+--   read from or ignore references to compute an unrestricted
+--   result.
 statically ::
       Reference f 'Dynamic
   ->. (Reference f 'Static ->. (Token, Unrestricted a))
@@ -71,8 +76,45 @@ dynamically_ :: Object f
   =>  Reference f 'Static
   ->. (f 'Dynamic ->. f 'Dynamic)
   ->. Token
-dynamically_ (Reference addr t0) f =
-  C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0))
+dynamically_ (Reference addr t0) f = L.poke addr (f (L.peek addr t0))
+
+-- | Repeatly follow references, performing modifications at each
+--   step, until the callback returns @Left@.
+burrow :: Object f
+  =>  Reference f 'Static
+  ->. (f 'Dynamic ->. Either (g 'Dynamic) (h 'Dynamic))
+  ->  (C.LensLike ((,) (Reference f 'Static)) (g 'Dynamic) (f 'Dynamic) (Reference f 'Dynamic) (Reference f 'Dynamic)) -- ^ recursive step
+  ->  (h 'Dynamic ->. f 'Dynamic) -- ^ final
+  ->. Token
+burrow (Reference addr t0) = burrowGo addr t0
+
+burrowGo :: Object f
+  =>  Addr
+  ->  Token
+  ->. (f 'Dynamic ->. Either (g 'Dynamic) (h 'Dynamic))
+  ->  (C.LensLike ((,) (Reference f 'Static)) (g 'Dynamic) (f 'Dynamic) (Reference f 'Dynamic) (Reference f 'Dynamic)) -- ^ recursive step
+  ->  (h 'Dynamic ->. f 'Dynamic) -- ^ final
+  ->. Token
+burrowGo addr t0 f g h = burrowEither addr (f (L.peek addr t0)) f g h
+
+burrowEither :: Object f
+  =>  Addr
+  ->  Either (g 'Dynamic) (h 'Dynamic)
+  ->. (f 'Dynamic ->. Either (g 'Dynamic) (h 'Dynamic))
+  ->  (C.LensLike ((,) (Reference f 'Static)) (g 'Dynamic) (f 'Dynamic) (Reference f 'Dynamic) (Reference f 'Dynamic)) -- ^ recursive step
+  ->  (h 'Dynamic ->. f 'Dynamic) -- ^ final
+  ->. Token
+burrowEither !addr (Right x) f g h = L.poke addr (h x)
+burrowEither !addr (Left x) f g h = C.uncurry
+  (\ref v -> burrow (L.inhume (L.poke addr v) ref) f g h)
+  (g unsafeDuplicateReference x)
+
+-- This does not require unsafeCoerce to write, but in general
+-- this function is unsafe to use. Its use in burrowEither is safe.
+unsafeDuplicateReference :: Reference f 'Dynamic ->. (Reference f 'Static, Reference f 'Dynamic)
+unsafeDuplicateReference (Reference addr t0) = C.uncurry
+  (\t1 t2 -> (Reference addr t1, Reference addr t2))
+  (C.coappend t0)
 
 -- | Repeatedly follow the references until the callback returns @Left@.
 --   At that point, update the reference we are currently in, and then
@@ -80,8 +122,8 @@ dynamically_ (Reference addr t0) f =
 descend :: Object f
   =>  Reference f 'Static
   ->. (forall (m :: Mode). f m ->. Either (g m) (h m))
-  ->  (g 'Static ->. Reference f 'Static)
-  ->  (h 'Dynamic ->. f 'Dynamic)
+  ->  (g 'Static ->. Reference f 'Static) -- ^ recursive step
+  ->  (h 'Dynamic ->. f 'Dynamic) -- ^ final
   ->. Token
 descend (Reference addr t0) = descendGo addr t0
 
@@ -92,20 +134,17 @@ descendGo :: Object f
   ->  (g 'Static ->. Reference f 'Static)
   ->  (h 'Dynamic ->. f 'Dynamic)
   ->.  Token
-descendGo addr t0 f g h = L.peeking addr t0
-  ( \t1 x -> descendEither addr t1 (f x) f g h
-  ) 
+descendGo addr t0 f g h = descendEither addr (f (L.peek addr t0)) f g h
 
 descendEither :: Object f
   =>  Addr
-  ->  Token
-  ->. (forall m. Either (g m) (h m))
+  ->  (forall m. Either (g m) (h m))
   ->. (forall (m :: Mode). f m ->. Either (g m) (h m))
   ->  (g 'Static ->. Reference f 'Static)
   ->  (h 'Dynamic ->. f 'Dynamic)
   ->.  Token
-descendEither addr t0 (Left x) f g h = descend (L.inhume t0 (g x)) f g h
-descendEither addr t0 (Right x) f g h = L.poke addr (h x) t0
+descendEither !addr (Left x) f g h = descend (g x) f g h
+descendEither !addr (Right x) f g h = L.poke addr (h x)
 
 -- descendEither :: Object f
 --   =>  g 'Static
@@ -114,24 +153,20 @@ descendEither addr t0 (Right x) f g h = L.poke addr (h x) t0
 -- | Allocate an object on the unmanaged heap.
 allocate :: forall f. Object f
   =>  f 'Dynamic
-  ->. Token
   ->. Reference f 'Dynamic
-allocate a !t0 = U.withAllocatedBytes (L.size (Proxy :: Proxy f)) t0
-  (\addr t1 -> Reference addr (L.poke addr a t1))
-
--- | Allocate a referential object on the unmanaged heap.
-allocate' :: forall f. Referential f
-  =>  f 'Dynamic
-  ->. Reference f 'Dynamic
-allocate' a = C.uncurry (C.flip allocate) (L.exhume a)
+allocate a = C.uncurry
+  (\t0 a' ->
+    U.withAllocatedBytes (L.size (Proxy :: Proxy f)) t0
+    (\addr t1 -> Reference addr (t1 <>. L.poke addr a'))
+  ) (L.exhume a)
 
 -- | Deallocate an object from the unmanaged heap.
 deallocate :: forall f. Object f
   =>  Reference f 'Dynamic
-  ->. (Token, f 'Dynamic)
+  ->. f 'Dynamic
 deallocate (Reference addr t0) = C.uncurry
-  (\t1 a -> U.withDeallocate addr t1 (\t2 -> (t2, a)))
-  (L.peek addr t0)
+  (\t1 a -> U.withDeallocate addr t1 (\t2 -> L.inhume t2 a))
+  (L.exhume (L.peek addr t0))
 
 -- | Modify either a static reference or a dynamic reference.
 modify :: Object f
@@ -139,7 +174,7 @@ modify :: Object f
   ->. (f 'Dynamic ->. f 'Dynamic)
   ->. Reference f m
 modify (Reference addr t0) f =
-  Reference addr (C.uncurry (C.flip (L.poke addr)) (C.second f (L.peek addr t0)))
+  Reference addr (L.poke addr (f (L.peek addr t0)))
 
 run :: (Token ->. (Token,Unrestricted a)) ->. Unrestricted a
 run = unsafeCoerce runNonlinear

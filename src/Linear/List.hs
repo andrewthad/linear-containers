@@ -1,13 +1,16 @@
 {-# language BangPatterns #-}
 {-# language DataKinds #-}
 {-# language GADTs #-}
+{-# language InstanceSigs #-}
 {-# language KindSignatures #-}
 {-# language LinearTypes #-}
+{-# language RankNTypes #-}
 {-# language ScopedTypeVariables #-}
 {-# language MagicHash #-}
 
 module Linear.List
   ( List(..)
+  , ListI(..)
   , cons
   , uncons
   , mapReference
@@ -18,19 +21,20 @@ module Linear.List
   , append
   , fromNonlinear
   , toNonlinear
+  , toPrim
+  , fromPrim
   ) where
 
 import Prelude hiding (map,foldl,replicate)
 
 import Linear.Class ((>>=.),(<*>.),(<>.))
-import Linear.Types (Object,Referential,Reference,Mode,PrimObject(..),Mode(..),Token)
-import Data.Primitive (Addr)
+import Linear.Types (Object,Reference,Mode,PrimObject(..),Mode(..),Token)
+import Data.Primitive (Addr,Prim)
 import Data.Proxy (Proxy(..))
 import Data.Kind (Type)
 import GHC.Exts (Int(..))
 import GHC.Int (Int64(..))
-import Linear.State (state,runState)
-import Data.Functor.Product (Product(Pair))
+import Linear.Reader (reader,runReader,bindReader)
 import qualified Linear.Class as C
 import qualified Linear.Types as L
 import qualified Linear.Reference as R
@@ -39,109 +43,121 @@ import qualified Data.List as List
 
 -- | A singly-linked list that must be consumed linearly.
 data List :: (Mode -> Type) -> Mode -> Type where
-  Cons :: {-# UNPACK #-} !(Reference (List f) m) ->. !(f m) ->. List f m
-  Nil :: {-# UNPACK #-} !Token ->. List f m
+  List :: ListI f m ->. Token ->. List f m
+
+data ListI :: (Mode -> Type) -> Mode -> Type where
+  Cons :: {-# UNPACK #-} !(Reference (List f) m) ->. !(f m) ->. ListI f m
+  Nil :: ListI f m
+
+data Cell :: (Mode -> Type) -> Mode -> Type where
+  Cell :: {-# UNPACK #-} !(Reference (List f) m) ->. !(f m) ->. Cell f m
 
 instance Object f => Object (List f) where
   size _ = (2 * wordSize) + L.size (Proxy :: Proxy f)
   -- Fix this Int64 madness
-  poke !addr (Nil t0) !t1 = L.poke addr (PrimObject (0 :: Int64)) (t0 <>. t1)
-  poke !addr (Cons ref a) !t0 = 
-       L.poke (PM.plusAddr addr (wordSize + wordSize)) a
-    $. L.poke (PM.plusAddr addr wordSize) ref
-    $. L.poke addr (PrimObject (1 :: Int64)) t0
+  poke !addr (List Nil t0) = L.poke addr (PrimObject (0 :: Int64) t0)
+  poke !addr (List (Cons ref a) t0) = 
+        L.poke (PM.plusAddr addr (wordSize + wordSize)) a
+    <>. L.poke addr (PrimObject (1 :: Int64) t0)
+    <>. L.poke (PM.plusAddr addr wordSize) ref
   -- TODO: Using Int64 here is a hack. We should be using machine
   -- integers instead, but GHC will not cooperate.
-  peeking !addr !t0 f = L.peeking addr t0
-    (\t1 (PrimObject (I64# x)) -> case x of
-      0# -> C.uncurry (\t2 t3 -> f t2 (Nil t3)) (C.coappend t1)
-      _ -> L.peeking (PM.plusAddr addr wordSize) t1
-        (\t2 ref -> L.peeking (PM.plusAddr addr (wordSize + wordSize)) t2
-          (\t3 payload -> f t3 (Cons ref payload)
-          )
-        )
-    )
-  forget (Nil t0) !t1 = t0 <>. t1
-  forget (Cons ref a) !t = R.ignore ref <>. L.forget a t
-
-instance Object f => Referential (List f) where
-  inhume t0 (Nil t1) = Nil (t0 <>. t1)
-  inhume t0 (Cons ref x) = Cons (L.inhume t0 ref) x
-  exhume (Nil t0) = C.second (\t1 -> Nil t1) (C.coappend t0)
-  exhume (Cons ref x) = C.second (\r -> Cons r x) (L.exhume ref)
+  peek :: forall (m :: Mode). Addr -> Token ->. List f m
+  peek !addr !t0 = go (L.peek addr t0)
+    where
+    go :: PrimObject Int64 m ->. List f m
+    go (PrimObject (I64# x) t1) = runReader
+      ( case x of
+          0# -> reader (List Nil)
+          _ -> C.liftA3 (\x y t -> List (Cons x y) t)
+            (reader (L.peek (PM.plusAddr addr wordSize)))
+            (reader (L.peek (PM.plusAddr addr (wordSize + wordSize))))
+            (reader C.id)
+      ) t1
+  forget (List Nil t0) = t0
+  forget (List (Cons ref a) t0) = R.ignore ref <>. L.forget a <>. t0
+  inhume t0 (List x t1) = List x (t0 <>. t1)
+  exhume (List x t0) = C.second (List x) (C.coappend t0)
 
 -- | The empty list
 nil :: Token ->. List f 'Dynamic
-nil = Nil
+nil = List Nil
 
 -- | /O(1)/ Push a new element onto the head of the list.
 cons :: Object f
   =>  f 'Dynamic
   ->. List f 'Dynamic
   ->. List f 'Dynamic
-cons x xs = Cons (R.allocate' xs) x
+cons x xs = C.uncurry (\t ref -> List (Cons ref x) t) (L.exhume (R.allocate xs))
 
 uncons :: Object f
   =>  List f 'Dynamic
   ->. Either Token (f 'Dynamic, List f 'Dynamic)
-uncons (Nil t0) = Left t0
-uncons (Cons ref x) = C.uncurry (\t0 xs -> Right (x,L.inhume t0 xs)) (R.deallocate ref)
+uncons (List Nil t0) = Left t0
+uncons (List (Cons ref x) t0) = Right (x,L.inhume t0 (R.deallocate ref))
 
 append :: Object f
   =>  List f 'Dynamic
   ->. List f 'Dynamic
   ->. List f 'Dynamic
-append (Nil t0) ys = L.inhume t0 ys
-append (Cons r x) ys = Cons
-  ( R.statically_ r
-    (\s -> R.descend s sumOfProducts
-      (\(Pair ref obj) -> C.uncurry L.inhume (C.first (L.forget obj) (L.exhume ref)))
-      (\(Token1 t) -> L.inhume t ys)
-    )
-  ) x
+append (List Nil t0) ys = L.inhume t0 ys
+append (List (Cons r x) t0) ys = List
+  ( Cons
+    ( R.statically_ r
+      (\s -> R.descend s sumOfProducts
+        (\(Cell ref obj) -> L.inhume (L.forget obj) ref)
+        (\(Token1 t) -> L.inhume t ys)
+      )
+    ) x
+  ) t0
 
 newtype Token1 :: Mode -> Type where
   Token1 :: Token ->. Token1 m
 
-sumOfProducts :: List f m ->. Either (Product (Reference (List f)) f m) (Token1 m)
-sumOfProducts (Nil t) = Right (Token1 t)
-sumOfProducts (Cons r obj) = Left (Pair r obj)
+sumOfProducts :: List f m ->. Either (Cell f m) (Token1 m)
+sumOfProducts (List Nil t0) = Right (Token1 t0)
+sumOfProducts (List (Cons r obj) t0) = Left (Cell (L.inhume t0 r) obj)
 
 -- | Map over a list, updating the elements in-place.
 map :: Object f
   =>  (f 'Dynamic ->. f 'Dynamic)
   ->  List f 'Dynamic
   ->. List f 'Dynamic
-map g (Nil t0) = (Nil t0)
-map g (Cons ref x) = Cons 
-  ( R.statically_
-    ref
-    (\refS -> C.uncurry (\t xs -> mapHelp2 g xs t) (R.read refS))
-  ) (g x)
+map g (List Nil t0) = List Nil t0
+map g (List (Cons ref x) t0) = List
+  ( Cons ( R.statically_ ref (\refS -> map' g refS)) (g x)
+  ) t0
 
 -- | Map over a reference to a list, updating the elements in-place.
 map' :: forall f. Object f
   =>  (f 'Dynamic ->. f 'Dynamic)
   ->  Reference (List f) 'Static
   ->. Token
-  ->. Token
-map' g ref t0 = 
-  C.uncurry (\t xs -> mapHelp2 g xs (t0 <>. t)) (R.read (R.modify ref (mapHelp1 g)))
+map' g ref = R.burrow ref sumOfProducts
+  (cellNext g)
+  (\(Token1 t) -> List Nil t)
 
-mapHelp2 :: Object f
-  =>  (f 'Dynamic ->. f 'Dynamic)
-  ->  List f 'Static
-  ->. Token
-  ->. Token
-mapHelp2 g (Nil t0) !t1 = t0 <>. t1
-mapHelp2 g (Cons xs a) !t = map' g xs (L.forget a t)
+-- This lens is used by map.
+cellNext :: (f 'Dynamic ->. f 'Dynamic) ->. C.Lens (Cell f 'Dynamic) (List f 'Dynamic) (Reference (List f) 'Dynamic) (Reference (List f) 'Dynamic)
+cellNext g k (Cell ref x) = C.map (\ref' -> C.uncurry (\t ref'' -> List (Cons ref'' (g x)) t) (L.exhume ref')) (k ref)
 
-mapHelp1 :: Object f
-  =>  (f 'Dynamic ->. f 'Dynamic)
-  ->  List f 'Dynamic
-  ->. List f 'Dynamic
-mapHelp1 g (Nil t0) = Nil t0
-mapHelp1 g (Cons xs a) = Cons xs (g a)
+-- 
+--   -- C.uncurry (\t xs -> mapHelp2 g xs (t0 <>. t)) (R.read (R.modify ref (mapHelp1 g)))
+-- 
+-- mapHelp2 :: Object f
+--   =>  (f 'Dynamic ->. f 'Dynamic)
+--   ->  List f 'Static
+--   ->. Token
+--   ->. Token
+-- mapHelp2 g (Nil t0) !t1 = t0 <>. t1
+-- mapHelp2 g (Cons xs a) !t = map' g xs (L.forget a t)
+-- 
+-- mapHelp1 :: Object f
+--   =>  (f 'Dynamic ->. f 'Dynamic)
+--   ->  List f 'Dynamic
+--   ->. List f 'Dynamic
+-- mapHelp1 g (Nil t0) = Nil t0
+-- mapHelp1 g (Cons xs a) = Cons xs (g a)
 
 -- I need to hook this up to a rewrite rule for map. Its just
 -- a more efficient version of map specialized to a reference
@@ -152,50 +168,58 @@ mapReference :: Object f
   =>  (f 'Dynamic ->. f 'Dynamic)
   ->  List (Reference f) 'Dynamic
   ->. List (Reference f) 'Dynamic
-mapReference g (Nil t0) = Nil t0
-mapReference g (Cons xsRefD xRef) = Cons
-  (R.statically_ xsRefD (\xsRef -> C.uncurry (\t0 xs -> mapReferenceGo g xs t0) (R.read xsRef)))
-  (R.modify xRef g)
+mapReference g (List Nil t0) = List Nil t0
+mapReference g (List (Cons xsRefD xRef) t0) = List
+  ( Cons
+    (R.statically_ xsRefD (\xsRef -> mapReferenceGo g (R.read xsRef)))
+    (R.modify xRef g)
+  ) t0
 
 mapReferenceGo :: Object f
   =>  (f 'Dynamic ->. f 'Dynamic)
   ->  List (Reference f) 'Static
   ->. Token
-  ->. Token
-mapReferenceGo g (Nil t0) !t1 = t0 <>. t1
-mapReferenceGo g (Cons xsRef xRef) !t0 = 
-  C.uncurry (\t1 xsNext -> mapReferenceGo g xsNext (t0 <>. t1 <>. R.dynamically_ xRef g)) (R.read xsRef)
+mapReferenceGo g (List Nil t0) = t0
+mapReferenceGo g (List (Cons xsRef xRef) t0) = 
+  mapReferenceGo g (R.read (L.inhume (t0 <>. R.dynamically_ xRef g) xsRef))
 
 foldl :: Object f
   =>  (b ->. f 'Dynamic ->. b)
   ->  b
   ->. List f 'Dynamic
   ->. (Token,b)
-foldl g !acc (Nil t) = (t,acc)
-foldl g !acc (Cons xsRef x) = C.uncurry (\t0 xs -> foldl g (g acc x) (L.inhume t0 xs)) (R.deallocate xsRef)
+foldl g !acc (List Nil t) = (t,acc)
+foldl g !acc (List (Cons xsRef x) t) = foldl g (g acc x) (R.deallocate (L.inhume t xsRef))
 
-replicate :: Object f
+replicate :: (Prim a)
   =>  Int
-  ->  f 'Dynamic
+  ->  a
   ->  Token
-  ->. List f 'Dynamic
-replicate n a t = replicateGo n a (nil t)
+  ->. List (PrimObject a) 'Dynamic
+replicate n a t = C.uncurry
+  (\t' t'' -> C.uncurry L.inhume (replicateGo n a (nil t') t''))
+  (C.coappend t)
 
-replicateGo :: Object f
+replicateGo :: (Prim a)
   =>  Int
-  ->  f 'Dynamic
-  ->  List f 'Dynamic
-  ->. List f 'Dynamic
-replicateGo n a xs = if n > 0
-  then replicateGo (n - 1) a (cons a xs)
-  else xs 
+  ->  a
+  ->  List (PrimObject a) 'Dynamic
+  ->. Token
+  ->. (Token, List (PrimObject a) 'Dynamic)
+replicateGo n a xs t = if n > 0
+  then C.uncurry (\t' t'' -> replicateGo (n - 1) a (cons (PrimObject a t') xs) t'') (C.coappend t)
+  else (t,xs)
 
 -- | Convert a list on the managed, nonlinear heap to a list on the
 --   linear heap. This new list does not contribute to garbage collector
 --   pauses.
 fromNonlinear :: Object f => [f 'Dynamic] ->. Token ->. List f 'Dynamic
-fromNonlinear [] t = Nil t
+fromNonlinear [] t = List Nil t
 fromNonlinear (x : xs) t = cons x (fromNonlinear xs t)
+
+fromPrim :: Prim a => [a] -> Token ->. List (PrimObject a) 'Dynamic
+fromPrim [] t = List Nil t
+fromPrim (x : xs) t = C.uncurry (\t' t'' -> cons (PrimObject x t') (fromPrim xs t'')) (C.coappend t)
 
 toNonlinear :: Object f => List f 'Dynamic ->. (Token, [f 'Dynamic])
 toNonlinear xs = toNonlinearStep (uncons xs) 
@@ -203,6 +227,13 @@ toNonlinear xs = toNonlinearStep (uncons xs)
 toNonlinearStep :: Object f => Either Token (f 'Dynamic, List f 'Dynamic) ->. (Token, [f 'Dynamic])
 toNonlinearStep (Left t0) = (t0,[])
 toNonlinearStep (Right (x,xs)) = C.uncurry (\t0 ys -> (t0,x : ys)) (toNonlinear xs)
+
+toPrim :: Prim a => List (PrimObject a) 'Dynamic ->. (Token, [a])
+toPrim xs = toPrimStep (uncons xs)
+
+toPrimStep :: Prim a => Either Token (PrimObject a 'Dynamic, List (PrimObject a) 'Dynamic) ->. (Token, [a])
+toPrimStep (Left t0) = (t0,[])
+toPrimStep (Right (PrimObject x t0,xs)) = C.uncurry (\t1 ys -> (t0 <>. t1,x : ys)) (toPrim xs)
 
 wordSize :: Int
 wordSize = PM.sizeOf (undefined :: Addr)

@@ -2,6 +2,7 @@
 {-# language GADTSyntax #-}
 {-# language LinearTypes #-}
 {-# language MagicHash #-}
+{-# language RankNTypes #-}
 {-# language ScopedTypeVariables #-}
 
 module Linear.Class
@@ -15,6 +16,10 @@ module Linear.Class
   , Bifunctor(..)
   , Movable(..)
   , Unrestricted(..)
+  , Lens
+  , Lens'
+  , LensLike
+  , LensLike'
   , (<*>.)
   , (<>.)
   , (>>=.)
@@ -22,11 +27,15 @@ module Linear.Class
   , uncurry
   , flip
   , coappend3
+  , liftA2
+  , liftA3
+  , id
   ) where
 
 import Prelude (Show)
 import GHC.Int (Int8(I8#),Int32(I32#),Int64(I64#))
 import GHC.Word (Word8(W8#))
+import Linear.Identity (Identity(..),runIdentity)
 
 import qualified Prelude as P
 
@@ -64,6 +73,9 @@ class Bifunctor f where
 --   apply f g a = uncurry
 --     (\a1 a2 -> f a1 (g a2)
 --     ) (coappend a)
+
+instance Functor ((,) a) where
+  map f (a,b) = (a, f b)
 
 instance Bifunctor (,) where
   first f (a,c) = (f a, c)
@@ -153,4 +165,20 @@ swapTriples (a1,a2) (b1,b2) (c1,c2) = ((a1,b1,c1),(a2,b2,c2))
 
 liftA2 :: Semiapplicative f => (a ->. b ->. c) ->. f a ->. f b ->. f c
 liftA2 f x = (<*>.) (map f x)
+
+liftA3 :: Semiapplicative f => (a ->. b ->. c ->. d) ->. f a ->. f b ->. f c ->. f d
+liftA3 f a b c = liftA2 f a b <*>. c
+
+id :: a ->. a
+id a = a
+
+type Lens s t a b = forall f. Functor f => (a ->. f b) ->. s ->. f t
+type Lens' s a = Lens s s a a
+type LensLike f s t a b = (a ->. f b) ->. s ->. f t
+type LensLike' f s a = LensLike f s s a a
+
+type Setter s t a b = (a ->. Identity b) ->. s ->. Identity t
+
+over :: Setter s t a b ->. (a ->. b) ->. s ->. t
+over l f y = runIdentity (l (\x -> Identity (f x)) y)
 

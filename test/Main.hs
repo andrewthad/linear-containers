@@ -6,7 +6,7 @@
 import Test.Tasty (testGroup,defaultMain)
 import GHC.Int (Int32(I32#))
 import Test.QuickCheck ((===),(==>))
-import Linear.Types (PrimObject(..),Mode(..),Token,getPrimObject)
+import Linear.Types (PrimObject(..),Mode(..),Token)
 import Linear.Class (Unrestricted(..),(<>.))
 
 import qualified GHC.Exts as E
@@ -19,31 +19,46 @@ import qualified Linear.Class as C
 
 main :: IO ()
 main = defaultMain $ testGroup "Linear"
-  [ testGroup "List"
-    [ TQC.testProperty "foldl (+) 0 (replicate n x) = n * x" $ \(QC.NonNegative (QC.Small (n :: Int32))) (x :: Int32) ->
-        C.getUnrestricted (Ref.run (\t -> C.second C.move (List.foldl linearAdd (PrimObject 0) (List.replicate (fromIntegral n) (PrimObject x) t))))
+  [ testGroup "primitives"
+    [ TQC.testProperty "PrimObject" $ \(i :: Int32) ->
+        C.getUnrestricted (Ref.run (\t0 -> unPrimObject (Ref.deallocate (Ref.allocate (PrimObject i t0)))))
         ===
-        PrimObject (n * x)
+        i
+    , TQC.testProperty "Reference" $ \(i :: Int32) ->
+        C.getUnrestricted (Ref.run (\t0 -> unPrimObject (Ref.deallocate (Ref.deallocate (Ref.allocate (Ref.allocate (PrimObject i t0)))))))
+        ===
+        i
+    ]
+  , testGroup "List"
+    [ TQC.testProperty "toPrim . fromPrim = id" $ \(xs :: [Int32]) ->
+        C.getUnrestricted (Ref.run (\t0 -> C.second C.move (List.toPrim (List.fromPrim xs t0))))
+        ===
+        xs
+    , TQC.testProperty "foldl (+) 0 (replicate n x) = n * x" $ \(QC.NonNegative (QC.Small (n :: Int32))) (x :: Int32) ->
+        C.getUnrestricted (Ref.run (\t0 -> C.uncurry (\t1 t2 -> C.uncurry (\tx (PrimObject r ty) -> (tx <>. ty, Unrestricted r)) (List.foldl linearAdd (PrimObject 0 t1) (List.replicate (fromIntegral n) x t2))) (C.coappend t0)))
+        ===
+        (n * x)
     , TQC.testProperty "append xs (append ys zs) = append (append xs ys) zs" $ \(xs :: [Int32]) ys zs ->
-        let C.Unrestricted (as,bs) = Ref.run (\t -> associativityAppend (C.coappend (C.coappend3 t)) (map PrimObject xs) (map PrimObject ys) (map PrimObject zs))
-         in map (\c -> getPrimObject c) as === map (\c -> getPrimObject c) bs
+        let C.Unrestricted (as,bs) = Ref.run (\t -> associativityAppend (C.coappend (C.coappend3 t)) xs ys zs) in as === bs
     ]
   ]
 
 associativityAppend ::
       ((Token,Token,Token),(Token,Token,Token))
-  ->. [PrimObject Int32 'Dynamic]
-  ->  [PrimObject Int32 'Dynamic]
-  ->  [PrimObject Int32 'Dynamic]
-  ->  (Token, Unrestricted ([PrimObject Int32 'Dynamic], [PrimObject Int32 'Dynamic]))
+  ->. [Int32]
+  ->  [Int32]
+  ->  [Int32]
+  ->  (Token, Unrestricted ([Int32], [Int32]))
 associativityAppend ((t1,t2,t3),(t4,t5,t6)) xs ys zs = tweak
-  (List.toNonlinear (List.append (List.fromNonlinear xs t1) (List.append (List.fromNonlinear ys t2) (List.fromNonlinear zs t3))))
-  (List.toNonlinear (List.append (List.append (List.fromNonlinear xs t4) (List.fromNonlinear ys t5)) (List.fromNonlinear zs t6)))
+  (List.toPrim (List.append (List.fromPrim xs t1) (List.append (List.fromPrim ys t2) (List.fromPrim zs t3))))
+  (List.toPrim (List.append (List.append (List.fromPrim xs t4) (List.fromPrim ys t5)) (List.fromPrim zs t6)))
   where
-  tweak :: (Token,[PrimObject Int32 'Dynamic]) ->. (Token,[PrimObject Int32 'Dynamic]) ->. (Token, Unrestricted ([PrimObject Int32 'Dynamic],[PrimObject Int32 'Dynamic]))
+  tweak :: (Token,[Int32]) ->. (Token,[Int32]) ->. (Token, Unrestricted ([Int32],[Int32]))
   tweak (a,as) (b,bs) = (a <>. b, C.move (as,bs))
 
 linearAdd :: PrimObject Int32 m ->. PrimObject Int32 m ->. PrimObject Int32 m
-linearAdd (PrimObject (I32# x)) (PrimObject (I32# y)) = PrimObject (I32# (E.narrow32Int# (x E.+# y)))
+linearAdd (PrimObject (I32# x) t0) (PrimObject (I32# y) t1) = PrimObject (I32# (E.narrow32Int# (x E.+# y))) (t0 <>. t1)
 
+unPrimObject :: PrimObject a 'Dynamic ->. (Token,Unrestricted a)
+unPrimObject (PrimObject a t) = (t,Unrestricted a)
 
