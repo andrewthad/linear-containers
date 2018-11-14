@@ -51,7 +51,7 @@ read :: Object f
   ->. f 'Static
 read (Reference addr t0) = L.peek addr t0
 
--- | Statically scope a computation without producing a unrestricted
+-- | Statically scope a computation without producing an unrestricted
 --   result.
 statically_ :: Object f
   =>  Reference f 'Dynamic
@@ -61,7 +61,7 @@ statically_ (Reference addr t0) f = Reference addr (f (Reference addr t0))
 
 -- | Statically scope a computation. This computation may freely
 --   read from or ignore references to compute an unrestricted
---   result.
+--   result. However, it still may not duplicate a reference.
 statically ::
       Reference f 'Dynamic
   ->. (Reference f 'Static ->. (Token, Unrestricted a))
@@ -76,7 +76,10 @@ dynamically_ :: Object f
   =>  Reference f 'Static
   ->. (f 'Dynamic ->. f 'Dynamic)
   ->. Token
-dynamically_ (Reference addr t0) f = L.poke addr (f (L.peek addr t0))
+dynamically_ (Reference addr t0) f =
+  -- TODO: Fix this. Currently, poke is not guaranteed to force all
+  -- peeks to happen. I'm working on this.
+  L.poke addr (f (L.peek addr t0))
 
 -- | Repeatly follow references, performing modifications at each
 --   step, until the callback returns @Left@.

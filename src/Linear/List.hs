@@ -57,9 +57,7 @@ instance Object f => Object (List f) where
   -- Fix this Int64 madness
   poke !addr (List Nil t0) = L.poke addr (PrimObject (0 :: Int64) t0)
   poke !addr (List (Cons ref a) t0) = 
-        L.poke (PM.plusAddr addr (wordSize + wordSize)) a
-    <>. L.poke addr (PrimObject (1 :: Int64) t0)
-    <>. L.poke (PM.plusAddr addr wordSize) ref
+    L.poke (PM.plusAddr addr (wordSize + wordSize)) (L.inhume (L.poke (PM.plusAddr addr wordSize) (L.inhume (L.poke addr (PrimObject (1 :: Int64) t0)) ref)) a)
   -- TODO: Using Int64 here is a hack. We should be using machine
   -- integers instead, but GHC will not cooperate.
   peek :: forall (m :: Mode). Addr -> Token ->. List f m
@@ -69,15 +67,19 @@ instance Object f => Object (List f) where
     go (PrimObject (I64# x) t1) = runReader
       ( case x of
           0# -> reader (List Nil)
-          _ -> C.liftA3 (\x y t -> List (Cons x y) t)
+          _ -> C.liftA2 (\x y -> C.uncurry (\ty y' -> C.uncurry (\tx x' -> (List (Cons x' y') (tx <>. ty))) (L.exhume x)) (L.exhume y))
             (reader (L.peek (PM.plusAddr addr wordSize)))
             (reader (L.peek (PM.plusAddr addr (wordSize + wordSize))))
-            (reader C.id)
       ) t1
   forget (List Nil t0) = t0
   forget (List (Cons ref a) t0) = R.ignore ref <>. L.forget a <>. t0
   inhume t0 (List x t1) = List x (t0 <>. t1)
   exhume (List x t0) = C.second (List x) (C.coappend t0)
+  exhumeAll (List Nil t0) = C.second (List Nil) (C.coappend t0)
+  exhumeAll (List (Cons r v) t0) = C.liftA3 (\x y z -> List (Cons x y) z)
+    (L.exhumeAll r)
+    (L.exhumeAll v)
+    (C.coappend t0)
 
 -- | The empty list
 nil :: Token ->. List f 'Dynamic
@@ -183,6 +185,8 @@ mapReferenceGo g (List Nil t0) = t0
 mapReferenceGo g (List (Cons xsRef xRef) t0) = 
   mapReferenceGo g (R.read (L.inhume (t0 <>. R.dynamically_ xRef g) xsRef))
 
+-- | Left fold over the list, strict in the accumulator. This deallocates
+--   the list as it walks over it.
 foldl :: Object f
   =>  (b ->. f 'Dynamic ->. b)
   ->  b
@@ -190,6 +194,16 @@ foldl :: Object f
   ->. (Token,b)
 foldl g !acc (List Nil t) = (t,acc)
 foldl g !acc (List (Cons xsRef x) t) = foldl g (g acc x) (R.deallocate (L.inhume t xsRef))
+
+-- | Left fold over the list, strict in the accumulator. This preserves
+--   the list.
+sfoldl :: Object f
+  =>  (b ->. f 'Static ->. b)
+  ->  b
+  ->. List f 'Static
+  ->. (Token,b)
+sfoldl g !acc (List Nil t) = (t,acc)
+sfoldl g !acc (List (Cons xsRef x) t) = sfoldl g (g acc x) (R.read (L.inhume t xsRef))
 
 replicate :: (Prim a)
   =>  Int

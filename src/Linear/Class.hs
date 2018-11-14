@@ -20,6 +20,7 @@ module Linear.Class
   , Lens'
   , LensLike
   , LensLike'
+  , (<$>.)
   , (<*>.)
   , (<>.)
   , (>>=.)
@@ -74,6 +75,9 @@ class Bifunctor f where
 --     (\a1 a2 -> f a1 (g a2)
 --     ) (coappend a)
 
+instance Semigroup a => Semiapplicative ((,) a) where
+  apply (a0,f) (a1,b) = (a0 <>. a1, f b)
+
 instance Functor ((,) a) where
   map f (a,b) = (a, f b)
 
@@ -110,6 +114,10 @@ instance Cosemigroup Int64 where
 
 instance Comonoid Int64 where
   coempty (I64# _) = ()
+
+infixl 4 <$>.
+(<$>.) :: Functor f => (a ->. b) ->. f a ->. f b
+(<$>.) = map
 
 infixl 4 <*>.
 (<*>.) :: Semiapplicative f => f (a ->. b) ->. f a ->. f b

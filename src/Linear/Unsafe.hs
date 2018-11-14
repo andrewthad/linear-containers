@@ -11,8 +11,10 @@
 module Linear.Unsafe
   ( Mode(..)
   , Reference(..)
+  , Slate(..)
   , Token(..)
   , withAllocatedBytes
+  , withReallocatedBytes
   , withDeallocate
   ) where
 
@@ -23,13 +25,19 @@ import GHC.IO (IO(..))
 import Data.Kind (Type)
 import Unsafe.Coerce (unsafeCoerce)
 import Data.Primitive (Addr(..))
-import Foreign.Marshal.Alloc (mallocBytes,free)
+import Foreign.Marshal.Alloc (reallocBytes,mallocBytes,free)
 import qualified Linear.Class as L
 
 data Mode = Dynamic | Static
 
 data Reference :: (Mode -> Type) -> Mode -> Type where
   Reference :: {-# UNPACK #-} !Addr -> {-# UNPACK #-} !Token ->. Reference f m
+
+-- | A slate is a small array that is used like a list. It supports inserts,
+--   which shift all rightward elements. The user specifies a maximal size
+--   at allocation time.
+data Slate :: (Mode -> Type) -> Mode -> Type where
+  Slate :: {-# UNPACK #-} !Addr -> {-# UNPACK #-} !Int -> {-# UNPACK #-} !Token ->. Slate f m
 
 -- | Tokens are used in order to enforce a sequencing of operations
 --   when there is no suitable data to attach a state token to. This
@@ -55,8 +63,15 @@ withDeallocateNonlinear (Addr addr#) (Token s0) f = case unIO (free (Ptr addr#))
 withAllocatedBytes :: Int -> Token ->. (Addr -> Token ->. a) ->. a
 withAllocatedBytes = unsafeCoerce withAllocatedBytesNonlinear
 
+withReallocatedBytes :: Int -> Addr -> Token ->. (Addr -> Token ->. a) ->. a
+withReallocatedBytes = unsafeCoerce withReallocatedBytesNonlinear
+
 withAllocatedBytesNonlinear :: Int -> Token -> (Addr -> Token ->. a) ->. a
 withAllocatedBytesNonlinear n (Token s0) f = case unIO (mallocBytes n) s0 of
+  (# s1, Ptr addr# #) -> f (Addr addr#) (Token s1)
+
+withReallocatedBytesNonlinear :: Int -> Addr -> Token -> (Addr -> Token ->. a) ->. a
+withReallocatedBytesNonlinear n (Addr a) (Token s0) f = case unIO (reallocBytes (Ptr a) n) s0 of
   (# s1, Ptr addr# #) -> f (Addr addr#) (Token s1)
 
 forkStateHelper :: (# State# RealWorld, State# RealWorld #) ->. (Token, Token)
